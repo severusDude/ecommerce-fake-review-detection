@@ -5,9 +5,12 @@ description = "Fine-tune IndoBERT for Shopee fake review detection."
 requires-python = ">=3.10"
 dependencies = [
     "accelerate>=0.28",
+    "jupyter>=1.0",
+    "matplotlib>=3.8",
     "numpy>=1.24",
     "pandas>=2.0",
     "scikit-learn>=1.3",
+    "seaborn>=0.13",
     "torch>=2.1",
     "transformers>=4.40",
 ]
