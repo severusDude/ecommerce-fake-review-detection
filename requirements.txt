@@ -7,3 +7,4 @@ jupyter>=1.0
 torch>=2.1
 transformers>=4.40
 accelerate>=0.28
+xgboost>=2.0

@@ -13,6 +13,7 @@ dependencies = [
     "seaborn>=0.13",
     "torch>=2.1",
     "transformers>=4.40",
+    "xgboost>=2.0",
 ]
 
 [tool.uv]
