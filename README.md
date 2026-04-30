@@ -62,6 +62,35 @@ uv run python src\burst_review_clustering.py --entity-column shop_id
 uv run python src\burst_review_clustering.py --window 12H --dbscan-eps 1.1 --dbscan-min-samples 4
 ```
 
+## Adding Balanced Strong Labels Pipeline
+
+```powershell
+uv run python src\strong_label_pipeline.py baseline
+uv run python src\strong_label_pipeline.py make-round --round 1
+uv run python src\strong_label_pipeline.py ingest-labels --round 1 --export-path data\labels\label_studio\round_1\export.json
+uv run python src\strong_label_pipeline.py make-round --round 2
+uv run python src\strong_label_pipeline.py ingest-labels --round 2 --export-path data\labels\label_studio\round_2\export.json
+uv run python src\strong_label_pipeline.py make-round --round 3
+uv run python src\strong_label_pipeline.py ingest-labels --round 3 --export-path data\labels\label_studio\round_3\export.json
+uv run python src\strong_label_pipeline.py make-round --round 4
+uv run python src\strong_label_pipeline.py ingest-labels --round 4 --export-path data\labels\label_studio\round_4\export.json
+uv run python src\strong_label_pipeline.py pseudo-label
+uv run python src\strong_label_pipeline.py label-spread
+uv run python src\strong_label_pipeline.py build-final
+uv run python src\strong_label_pipeline.py validate
+```
+
+Output utama:
+
+- `reports\strong_labels\xgb_baseline_cv_metrics.csv`
+- `reports\strong_labels\xgb_baseline_cv_summary.csv`
+- `reports\strong_labels\xgb_feature_importance.csv`
+- `reports\strong_labels\selected_features.csv`
+- `data\labels\label_studio\round_*\tasks.jsonl`
+- `data\labels\review_shopee_500_strong_labels.csv`
+
+Pipeline memakai 100 seed label dari `data\processed\review_shopee_processed.csv`, menambah active-learning human labels sampai subset human final 250 label seimbang, lalu mengisi sisa label dengan pseudo-label XGBoost dan Label Spreading. Jika 3 ronde belum cukup seimbang, lanjut saja ke ronde 4, 5, dan seterusnya sampai target human `125 fake / 125 original` tercapai. File Label Studio memakai import/export lokal; pakai `configs\label_studio_fake_review.xml` agar model probability tetap hanya menjadi metadata task dan tidak tampil ke annotator.
+
 ## Visualisasi Hasil
 
 ```powershell
