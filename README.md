@@ -1,11 +1,13 @@
 # Fake Review Detection with IndoBERT
 
-Project ini fine-tune IndoBERT untuk klasifikasi review Shopee menjadi `fake` atau `original`.
+Project ini fine-tune IndoBERT dan baseline TF-IDF Logistic Regression untuk klasifikasi review Shopee menjadi `fake` atau `original`.
 
-Dataset default berasal dari repo [`andrioktavianto/fake-review-shopee`](https://github.com/andrioktavianto/fake-review-shopee):
+Dataset modelling default adalah strong-label dataset lokal:
 
-- `train_review_only.csv`: dataset berlabel, dipakai untuk training supervised.
-- `review_shopee.csv`: data mentah tanpa kolom label `fakeornot`, cocok untuk eksplorasi atau semi-supervised, bukan training utama.
+- `data\labels\review_shopee_labelled.csv`: 500 label seimbang hasil strong-label pipeline.
+- `data\processed\review_shopee_processed.csv`: sumber teks `comment`; digabung ke label file memakai `cmtid`.
+
+Model teks tetap memakai hanya kolom `comment`. Metadata dan fitur perilaku dipakai untuk pipeline strong-label dan suspicious product modelling, bukan input TF-IDF/IndoBERT.
 
 ## Setup with uv
 
@@ -19,6 +21,8 @@ uv sync
 uv run python src\baseline_tfidf.py
 ```
 
+Default script membaca `data\labels\review_shopee_labelled.csv`, lalu mengambil teks review dari `data\processed\review_shopee_processed.csv` berdasarkan `cmtid`.
+
 Output:
 
 - `reports\tfidf_baseline\metrics.json`
@@ -31,7 +35,7 @@ Output:
 uv run python src\train_indobert.py
 ```
 
-Default model: `indobenchmark/indobert-base-p1`.
+Default model: `indobenchmark/indobert-base-p1`. Default data sama dengan baseline TF-IDF: strong-label CSV digabung dengan processed CSV untuk mendapatkan `comment`.
 
 Output:
 
@@ -100,11 +104,41 @@ uv run jupyter notebook notebooks\visualize_results.ipynb
 
 Notebook visualisasi memakai seaborn untuk membandingkan metrik TF-IDF Logistic Regression dan IndoBERT, confusion matrix kedua model, distribusi cluster DBSCAN/KMeans, serta kandidat burst review berdasarkan `burst_risk_score`.
 
+Untuk visualisasi khusus model teks strong-label:
+
+```powershell
+uv run jupyter notebook notebooks\visualize_text_model_results.ipynb
+```
+
+Notebook ini membaca `reports\tfidf_baseline` dan `reports\indobert`, lalu menyimpan figure seaborn ke:
+
+- `reports\text_model_visualization\figures\`
+
+## Suspicious Product Identification Modelling
+
+```powershell
+uv run python src\model_suspicious_products.py
+```
+
+Script ini memakai `data\labels\review_shopee_labelled.csv` dan fitur dari `reports\strong_labels\selected_features.csv` untuk melatih model probabilitas fake review, lalu mengagregasi skor ke level produk (`item_id`). Output utama adalah ranking produk untuk audit manual, bukan vonis fraud final.
+
+Output:
+
+- `reports\modelling\review_model_metrics.json`
+- `reports\modelling\review_classification_report.txt`
+- `reports\modelling\review_confusion_matrix.csv`
+- `reports\modelling\feature_importance.csv`
+- `reports\modelling\product_suspicious_scores.csv`
+- `reports\modelling\top_suspicious_products.csv`
+- `reports\modelling\modelling_summary.json`
+
+Dokumen metodologi: `docs\modelling_suspicious_product_identification.md`.
+
 ## Opsi Penting
 
 ```powershell
 uv run python src\train_indobert.py --epochs 3 --batch-size 8 --max-length 256
-uv run python src\train_indobert.py --data-path data\train_review_only.csv
+uv run python src\train_indobert.py --data-path data\labels\review_shopee_labelled.csv --processed-path data\processed\review_shopee_processed.csv
 uv run python src\train_indobert.py --model-name indobenchmark/indobert-base-p2
 ```
 
