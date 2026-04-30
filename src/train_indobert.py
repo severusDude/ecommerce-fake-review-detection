@@ -15,7 +15,6 @@ from torch.utils.data import Dataset
 from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer, Trainer, TrainingArguments
 
 
-DEFAULT_DATA_URL = "https://raw.githubusercontent.com/andrioktavianto/fake-review-shopee/master/train_review_only.csv"
 LABEL_MAP = {"original": 0, "fake": 1}
 ID_TO_LABEL = {0: "original", 1: "fake"}
 
@@ -45,8 +44,9 @@ class ReviewDataset(Dataset):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fine-tune IndoBERT for Shopee fake review detection.")
-    parser.add_argument("--data-path", default="data/train_review_only.csv", help="Path to labeled CSV.")
-    parser.add_argument("--data-url", default=DEFAULT_DATA_URL, help="URL used when --data-path is missing.")
+    parser.add_argument("--data-path", default="data/labels/review_shopee_labelled.csv", help="Path to labeled CSV.")
+    parser.add_argument("--processed-path", default="data/processed/review_shopee_processed.csv", help="Processed CSV used to recover comment text by cmtid.")
+    parser.add_argument("--data-url", default="", help="Optional URL used when --data-path is missing.")
     parser.add_argument("--text-column", default="comment")
     parser.add_argument("--label-column", default="fakeornot")
     parser.add_argument("--model-name", default="indobenchmark/indobert-base-p1")
@@ -75,7 +75,7 @@ def set_seed(seed: int) -> None:
 def ensure_data(path: Path, url: str, no_download: bool) -> None:
     if path.exists():
         return
-    if no_download:
+    if no_download or not url:
         raise FileNotFoundError(f"Missing dataset: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     urllib.request.urlretrieve(url, path)
@@ -87,22 +87,69 @@ def clean_text(value: object) -> str:
     return text.strip()
 
 
-def load_dataset(path: Path, text_column: str, label_column: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    missing = {text_column, label_column} - set(df.columns)
+def require_columns(df: pd.DataFrame, columns: set[str], name: str) -> None:
+    missing = columns - set(df.columns)
     if missing:
-        raise ValueError(f"Missing required columns: {sorted(missing)}")
+        raise ValueError(f"{name} missing required columns: {sorted(missing)}")
 
-    df = df[[text_column, label_column]].copy()
+
+def label_counts(series: pd.Series) -> dict[str, int]:
+    counts = series.value_counts().sort_index()
+    return {ID_TO_LABEL[int(label)]: int(count) for label, count in counts.items()}
+
+
+def merge_comment_text(df: pd.DataFrame, processed_path: Path, text_column: str) -> pd.DataFrame:
+    require_columns(df, {"cmtid"}, "labelled data")
+    if not processed_path.exists():
+        raise FileNotFoundError(f"Missing processed dataset: {processed_path}")
+
+    labelled = df.copy()
+    labelled["cmtid"] = labelled["cmtid"].fillna("").astype(str).str.strip()
+    if labelled["cmtid"].duplicated().any():
+        raise ValueError("Labelled data has duplicate cmtid values.")
+
+    processed = pd.read_csv(processed_path, dtype={"cmtid": str}, keep_default_na=False)
+    require_columns(processed, {"cmtid", text_column}, "processed data")
+    processed["cmtid"] = processed["cmtid"].fillna("").astype(str).str.strip()
+    if processed["cmtid"].duplicated().any():
+        raise ValueError("Processed data has duplicate cmtid values.")
+
+    merged = labelled.merge(processed[["cmtid", text_column]], on="cmtid", how="left", validate="one_to_one")
+    if merged[text_column].isna().any():
+        missing_count = int(merged[text_column].isna().sum())
+        raise ValueError(f"{missing_count} labelled rows could not be matched to processed comments.")
+    return merged
+
+
+def load_dataset(path: Path, processed_path: Path, text_column: str, label_column: str) -> tuple[pd.DataFrame, dict[str, object]]:
+    df = pd.read_csv(path, dtype={"cmtid": str}, keep_default_na=False)
+    require_columns(df, {label_column, "label_source", "confidence"}, "labelled data")
+    if text_column not in df.columns:
+        df = merge_comment_text(df, processed_path, text_column)
+
+    require_columns(df, {text_column, label_column}, "training data")
+    df = df[[text_column, label_column, "label_source", "confidence"]].copy()
     df[text_column] = df[text_column].map(clean_text)
     df[label_column] = df[label_column].astype(str).str.strip().str.lower()
-    df = df[df[text_column].ne("")]
     df = df[df[label_column].isin(LABEL_MAP)]
     df["label"] = df[label_column].map(LABEL_MAP).astype(int)
 
     if df["label"].nunique() != 2:
         raise ValueError("Dataset must contain both labels: fake and original.")
-    return df
+    counts = label_counts(df["label"])
+    if counts.get("original") != counts.get("fake"):
+        raise ValueError(f"Expected balanced labels, found {counts}.")
+
+    metadata = {
+        "data_path": str(path),
+        "processed_path": str(processed_path),
+        "text_column": text_column,
+        "label_column": label_column,
+        "empty_text_count": int(df[text_column].eq("").sum()),
+        "label_counts": counts,
+        "label_source_counts": {str(k): int(v) for k, v in df["label_source"].value_counts().items()},
+    }
+    return df, metadata
 
 
 def split_dataset(df: pd.DataFrame, test_size: float, val_size: float, seed: int):
@@ -115,6 +162,14 @@ def split_dataset(df: pd.DataFrame, test_size: float, val_size: float, seed: int
         random_state=seed,
     )
     return train, val, test
+
+
+def split_label_counts(train: pd.DataFrame, val: pd.DataFrame, test: pd.DataFrame) -> dict[str, dict[str, int]]:
+    return {
+        "train": label_counts(train["label"]),
+        "val": label_counts(val["label"]),
+        "test": label_counts(test["label"]),
+    }
 
 
 def compute_metrics(eval_pred) -> dict[str, float]:
@@ -179,7 +234,15 @@ def build_trainer(
     return Trainer(**trainer_kwargs)
 
 
-def save_reports(trainer: Trainer, test_dataset: ReviewDataset, test_df: pd.DataFrame, reports_dir: Path, train_len: int, val_len: int) -> None:
+def save_reports(
+    trainer: Trainer,
+    test_dataset: ReviewDataset,
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    reports_dir: Path,
+    dataset_metadata: dict[str, object],
+) -> None:
     predictions_output = trainer.predict(test_dataset)
     predictions = np.argmax(predictions_output.predictions, axis=-1)
     labels = np.array(test_df["label"].tolist())
@@ -189,10 +252,13 @@ def save_reports(trainer: Trainer, test_dataset: ReviewDataset, test_df: pd.Data
         "precision": precision_score(labels, predictions, zero_division=0),
         "recall": recall_score(labels, predictions, zero_division=0),
         "f1": f1_score(labels, predictions, zero_division=0),
-        "n_train": int(train_len),
-        "n_val": int(val_len),
+        "n_train": int(len(train_df)),
+        "n_val": int(len(val_df)),
         "n_test": int(len(test_df)),
-        "label_counts": test_df["label"].value_counts().sort_index().to_dict(),
+        "n_total": int(len(train_df) + len(val_df) + len(test_df)),
+        "label_counts": dataset_metadata["label_counts"],
+        "split_label_counts": split_label_counts(train_df, val_df, test_df),
+        "dataset": dataset_metadata,
     }
 
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -213,11 +279,12 @@ def main() -> None:
     set_seed(args.seed)
 
     data_path = Path(args.data_path)
+    processed_path = Path(args.processed_path)
     output_dir = Path(args.output_dir)
     reports_dir = Path(args.reports_dir)
 
     ensure_data(data_path, args.data_url, args.no_download)
-    df = load_dataset(data_path, args.text_column, args.label_column)
+    df, dataset_metadata = load_dataset(data_path, processed_path, args.text_column, args.label_column)
     train, val, test = split_dataset(df, args.test_size, args.val_size, args.seed)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -238,7 +305,7 @@ def main() -> None:
     trainer.train()
     trainer.save_model(output_dir)
     tokenizer.save_pretrained(output_dir)
-    save_reports(trainer, test_dataset, test, reports_dir, len(train), len(val))
+    save_reports(trainer, test_dataset, train, val, test, reports_dir, dataset_metadata)
 
 
 if __name__ == "__main__":
